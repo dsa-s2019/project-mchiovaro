@@ -381,7 +381,6 @@ The author would like to thank Jun Yan and all students in the Data Science in A
 
 # References {-}
 
-[Breiman, 2001]: https://link.springer.com/content/pdf/10.1023%2FA%3A1010933404324.pdf
 [MICE]: https://www.jstatsoft.org/v45/i03/
 [randomForest]: https://cran.r-project.org/web/packages/randomForest/
 [template]: https://github.com/wenjie2wang/datalab-templates
