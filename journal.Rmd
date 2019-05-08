@@ -1,0 +1,387 @@
+---
+title: "A randomForest Approach to the Kaggle Competition: *Titanic: Machine Learning from Disaster*"
+author:
+  - Megan Chiovaro^[<megan.chiovaro@uconn.edu>; Ph.D. student at
+    Department of Psychological Sciences, University of Connecticut.]
+date: "`r format(Sys.time(), '%d %B %Y')`"
+documentclass: article
+papersize: letter
+fontsize: 11pt
+bibliography: template.bib
+biblio-style: asa
+keywords: Kaggle, Machine Learning, MICE, randomForest
+output:
+  bookdown::pdf_document2
+  bookdown::html_document2
+abstract: |
+    This is a Machine Learning model for the Kaggle Competition: "Titanic: Machine Learning from Disaster". The model was trained to predict survival ("Survived") on the training dataset consisting of 891 observations of 11 features. Missing value imputation was performed using a combination of logical reasoning and Multivariate Imputation by Chained Equations (MICE). Several engineered features were created to improve accuracy. The model was trained using the Machine Learning package randomForest. Predictions were made on the testing dataset consisting of 418 observations and was submitted to Kaggle for evaluation of accuracy. The model achieved 80.04% accuracy in predicting survival of Titanic passengers.
+---
+
+
+```{r setup, echo = FALSE, message = FALSE, warning = FALSE}
+## some utility functions, see the source code for details
+source("utils_template.R")
+
+## specify the packages needed
+pkgs <- c("DT", "leaflet", "splines2", "webshot")
+need.packages(pkgs)
+
+knitr::opts_chunk$set(comment = NA)
+## for latex and html output
+isHtml <- knitr::is_html_output()
+isLatex <- knitr::is_latex_output()
+latex <- ifelse(isLatex, '\\LaTeX\\', 'LaTeX')
+
+## specify global chunk options
+knitr::opts_chunk$set(fig.width = 5, fig.height = 4, dpi = 300,
+                      out.width = "90%", fig.align = "center")
+
+chooseCRANmirror(graphics = FALSE, ind=1)
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+
+# Introduction {#sec:intro}
+
+This is a proposal for a Machine Learning model for Kaggle's "Titanic: Machine Learning from Disaster" Competition. Training data contained 891 observations of 11 variables: 
+
+Variable Name |Description                        | Levels
+--------------|-----------------------------------| -----------------------------
+Survived      | Survived (1) or died (0)          | 0 = No, 1 = Yes
+Pclass        | Passenger's class                 | 1 = 1st, 2 = 2nd, 3 = 3rd
+Name          | Passenger's name                  |
+Sex           | Passenger's sex                   |
+Age           | Passenger's age                   |
+SibSp         | Number of siblings/spouses aboard |
+Parch         | Number of parents/children aboard |
+Ticket        | Ticket number                     |
+Fare          | Fare                              |
+Cabin         | Cabin                             |
+Embarked      | Port of embarkation               | C = Cherbourg, Q = Queenstown, S = Southampton
+
+Test data contains 418 observations of all variables with the exception of 'Survived'. The challenge questions the likelihood of survival of passengers across these features. Guidelines request the use of Machine Learning techniques to analyze and create a model predicting 'Survived' on the test set.
+
+This model employs randomForest for its adversion to overfitting, as well as it's easy to use algorithms [@Breiman2001, @Liaw2002]. It is fast to train and quick to make predictions on small data files such as those used in this competition.
+
+```{r, include=FALSE, echo = FALSE}
+
+install.packages(c("ggplot2", "ggthemes", "scales", "dplyr", "mice", "randomForest", "tidyverse"))
+
+library('ggplot2')
+library('ggthemes') 
+library('scales') 
+library('dplyr')
+library('mice') # multiple imputation
+library('randomForest') # machine learning algorithm
+library('tidyverse')
+library('caret')
+library('ggplot2')
+
+```
+
+```{r, echo = FALSE}
+train <- read.csv("train.csv", stringsAsFactors = FALSE)
+test <- read.csv("test.csv", stringsAsFactors = FALSE)
+full <- bind_rows(train, test)
+
+#str(full)
+```
+
+
+# Missing Value Imputation
+
+## Embarked
+
+The feature Embarked was missing for two observations.
+
+```{r full, echo=FALSE, warning = FALSE}
+
+#table(full$Embarked)
+full$Embarked <- factor(as.character(full$Embarked), levels=c(" " ,"C","Q", "S"))
+levels(full$Embarked)[1] <- NA
+# summary(full$Embarked)
+
+emb_missing <- subset(full, is.na(full$Embarked))
+emb_missing[, c(1, 3, 10, 12)] # Passenger 62 and 830 are missing values for Embarked
+```
+
+Features related to Embarked are Fare and Pclass, likely because they both have to do with living location and thus SES. Below is a box plot of these variables.
+
+```{r, echo=FALSE, warning = FALSE, fig.height=3}
+emb_test <- full %>% filter(full$PassengerId != 62 & full$PassengerId != 830)
+# table(emb_test$Embarked) # Full data set without two passengers with missing Embarked locations
+
+# Now let's check out the relationships with Embarked based on Fare and Pclass
+ggplot(emb_test, aes(x = Embarked, y = Fare, fill = factor(Pclass))) +
+  geom_boxplot()
+
+# We can see now that there is a clear relationship between Fare, Pclass, and Embarked
+# Passengers 62 and 830 both had Pclass = 1, and Fare = $80, so it is a fair guess that they embarked from "C"
+full$Embarked[c(62, 830)] <- 'C'
+#table(full$Embarked) # Check for successful imputation
+
+```
+
+Both observations missing Embarked had a Pclass of 1 and a Fare of 80. Thus for passengers in Pclass 1 with Fare 80, it is clear that location C is the most likely point of Embarkment. Location C was imputed for these missing values.
+
+## Fare
+
+There was one observation (#1044) that was missing a value for Fare. They had Pclass 3 and Embarked S. As demonstrated previously, Fare is highly related to Pclass. 
+
+In the figures below, it is obvious that there is clear, non-overlapping price range for individuals in each Pclass and for each Embarked location.
+
+```{r, echo=FALSE, warning = FALSE, fig.height=1.75}
+
+full$Pclass <- as.factor(full$Pclass)
+fare_missing <- subset(full, is.na(full$Fare))
+# fare_missing
+# Observation 1044 has NA for fare
+# As we saw from our Embarked imputation, there is a relationship between Fare, Embarked, and Pclass. 
+
+fare_test <- full %>% filter(full$PassengerId != 1044)
+# sum(is.na(fare_test$Fare)) # Full data set without two passengers with missing Embarked locations
+
+# check out the relationships with Fare based on Pclass
+ggplot(fare_test, aes(x = Fare, y = Pclass)) + geom_boxplot() 
+ # We can see that there are distinct fare rates between the classes
+
+ggplot(fare_test, aes(x = Fare, y = Embarked)) + geom_boxplot() 
+
+# Since this relationship exists, we can input this value based on the median of people in Pclass 3, embarking from location S.
+full$Fare[1044] <- median(full[full$Pclass == '3' & full$Embarked == 'S', ]$Fare, na.rm = TRUE)
+# sum(is.na(full$Fare))
+```
+Fare was imputed for observation 1044 using the median of Fares for passengers in Pclass 3 having Embarked from location S.
+
+## Cabin
+
+The feature Cabin was largely unrecorded and was thus unable to be imputed on. For this reason, it was left out of the model.
+```{r, warning = FALSE, echo=FALSE}
+
+# Cabin has a significant number of miissing values with no good way to imput
+# str(full$Cabin)
+# Just in looking at full, we can see that there are way too many observations missing Cabin so we will throw this variable out.
+```
+
+## Age
+
+```{r, echo = FALSE, warning=FALSE}
+# summary(full$Age)
+```
+The value for Age was missing across 263 observations. Although this is a sizable portion of the data, the variable is logically essential in determining likelihood of survival.
+
+Multivariate Imputation by Chained Equations (*[MICE]*) imputation was done using the features Pclass, Sex, Age, Fare, Title, SibSp, Parch, Embarked, and Mother (variables Title and Mother were created during feature engineering, see sections 3.3-3.4). All variables used were first transformed into factors to denote the imputation as a classification problem and not a regression problem. Random forest (rf) method was done 30 times to attain good imputations.
+
+# Feature Engineering
+
+## FamilySize
+
+Using SibSp and Parch, a feature for total family size, FamilySize, was created. This was done by summing the values for SibSp and Parch and then adding one to include that given passenger.
+
+$$FamilySize = SibSp + Parch + 1$$
+
+```{r, echo=FALSE, warning=FALSE}
+full$FamilySize <- 1 + full$SibSp + full$Parch
+#summary(full$FamilySize)
+
+```
+
+## FamilyType
+
+Families were further grouped into "Large" (FamilySize > 4), "Medium" (1 < FamilySize <= 4), or "Single" (FamilySize = 1), given the drop in survival for families larger than four and those traveling alone.
+
+```{r, echo=FALSE, warning=FALSE, fig.height=2.5}
+
+train$FamilySize <- 1 + train$SibSp + train$Parch
+ggplot(train) +
+  aes(x = FamilySize, fill = factor(Survived)) +
+  geom_bar(position = "fill")
+
+full <- full %>%  mutate(FamilyType = factor(ifelse(full$FamilySize > 4, "Large", ifelse(full$FamilySize == 1, "Single", "Medium"))))
+
+```
+This varible is denoted 'FamilyType'.
+
+## Title
+
+Titles were extracted from the Name feature to get a measure of status for the passengers. Original data contained 18 unique Titles.
+```{r, echo=FALSE, warning=FALSE}
+# Pulling Title (rank plays into importance for getting onto a lifeboat)
+full$Title <-  gsub("^.*, (.*?)\\..*$", "\\1", full$Name)
+table(full$Sex, full$Title)
+```
+In the early 1900's, there were multiple Titles to denote a married or unmarried woman. They were: Mlle, Miss, and Ms for an unmarried woman, and Mme and Mrs for a married woman. These Titles were replaced with Miss and Mrs respectively for simplicity. 
+
+```{r, echo=FALSE, warning=FALSE}
+# Adding more intuitive Titles
+full$Title[full$Title == 'Mlle']        <- 'Miss' 
+full$Title[full$Title == 'Ms']          <- 'Miss'
+full$Title[full$Title == 'Mme']         <- 'Mrs'
+#table(full$Sex, full$Title)
+```
+
+Some Titles appeared for a minute number of passengers. Titles used for 8 or fewer passengers were replaced with "Rare Title", as they could not be used for prediction. Having a "Rare Title" is also an indicator of specialized jobs or work positions that may affect survival probability.
+
+## Mother
+
+Another new feature, Mother, was created and evaluated as 'yes' or 'no' across observations. A passenger was given the label Mother if they had an adult, feminine Title ("Mrs", "the Countess", "Dona", "Lady") and Parch was greater than zero.
+
+```{r, echo=FALSE, warning=FALSE}
+full <- full %>%
+          mutate(Mother = factor(ifelse(c(full$Title == "Mrs" | full$Title == "the Countess" | full$Title == "Dona" | full$Title == "Lady") & full$Parch > 0, "Yes", "No"))) 
+
+# Creating rare Title for useless ones
+rare_title <- c('Dona', 'Lady', 'the Countess','Capt', 'Col', 'Don', 
+                'Dr', 'Major', 'Rev', 'Sir', 'Jonkheer')
+
+full$Title[full$Title %in% rare_title]  <- 'Rare Title'
+
+#table(full$Sex, full$Title) #Check out new Titles based on sex
+```
+
+## Surname
+
+Another feature extracted from the Name feature was Surname. Often used to evaluate ethnicity, last name plays a roll in survival, likely due to ethnic biases amoung the lifeboat workers of the ship.
+
+```{r, echo=FALSE}
+# Pulling Surname (Family status has effect)
+full$Surname <-  sapply(full$Name, function(x) strsplit(x, split = '[,.]')[[1]][1])
+
+# Creating unique family identifier using last name and number of family members
+full$Family <- paste(full$Surname, full$FamilySize, sep = '_')
+
+```
+
+## Shared_ticket
+
+Some passengers shared their tickets. This was evaluated based on those whom had the same Ticket number. This feature helps identify groups of people who were together on the Titanic, but did not necessarily have the same Surname, including groups of friends and unmarried couples or fiances.
+
+```{r, echo=FALSE}
+tickets <- full %>% count(Ticket) %>% rename(Shared_ticket=n)
+full$Shared_ticket <- tickets$Shared_ticket[match(full$Ticket, tickets$Ticket)]
+
+#summary(full$Shared_ticket)
+```
+This feature may appear redundant to family membership, but there were many groups of people who shared tickets but did not share family membership. Adding this feature did increase accuracy of the model.
+
+```{r, echo = FALSE, include=FALSE}
+
+# Now that the new features were created, we can impute Age!
+full$Pclass <- as.factor(full$Pclass)
+full$Sex <- as.factor(full$Sex)
+full$Embarked <- as.factor(full$Embarked)
+full$Title <- as.factor(full$Title)
+full$Family <- as.factor(full$Family)
+full$Surname <- as.factor(full$Surname)
+full$FamilySize <- as.factor(full$FamilySize)
+
+summary(full$Age) # we see that there are tons of missing Age values
+full$MissingAge <- ifelse(is.na(full$Age), 
+                           "Y", "N")
+full$MissingAge <- as.factor(full$MissingAge)
+
+# Set a random seed
+set.seed(129)
+
+# Perform MICE imputation, using only Pclass, Sex, Age, Fare, Title, SibSp, Parch, Embarked, Mother
+mice <- mice(full[, !names(full) %in% c('PassengerId','Name','Ticket','Cabin','Family','FamilyType','FamilySize','Surname','Survived', 'MissingAge', 'Shared_ticket')], m=30, method='rf') 
+output <- mice::complete(mice)
+
+full$Age <- output$Age
+# sum(is.na(full$Age))
+
+```
+
+# The Model
+
+This machine learning model employs *[randomForest]* to predict Survived based on the features: Pclass, Sex, Age, SibSp, Parch, Fare, Embarked, Title, FamilyType, Shared_ticket, Mother, and MissingAge. The logic for the inclusion of these features is as follows:
+
+- Pclass: Passenger class may have an impact on percieved importance by boat workers, thus giving them higher priority for getting onto a lifeboat.
+- Sex: Women were prioritized in getting on lifeboats
+- Age: Young children and the elderly would need assistance in getting off the ship, thus potentially decreasing their chances of survival.
+- SibSp and Parch: Family relationships lead to heroic acts and sacrifice.
+- Fare: A passengers Fare is also an indicator of their status and may also have an impact on their percieved importance by boat workers.
+- Title: A passengers title is also an indicator of their status.
+- FamilyType: There is a clear survival benefit to being in a medium sized family.
+- Shared_ticket: This helps identify groups and thus acts similarly to FamilyType for those traveling with groups of friends.
+- Mother: Mothers were prioritized in getting on the life boats.
+- MissingAge: Those whose age was missing were commonly ship workers and lower class individuals, who had low priority for getting a spot on a life boat.
+
+```{r, echo=FALSE}
+full$Survived <- as.factor(full$Survived)
+full$MissingAge <- as.factor(full$MissingAge)
+train <- full[1:891,]
+test <- full[892:1309,]
+```
+
+
+```{r, echo=FALSE, include = FALSE}
+
+# Internal accuracy check: pre-submission
+set.seed(5421) # Used for reproducibility,
+indexes <- createDataPartition(train$Survived,
+                               times = 1, # number of splits done during one run
+                               p = 0.7, # what proportion of the origional data set we want, while maintaining the proportions of survived/died
+                               list = FALSE) # we don't want to see all the looooong lists of information
+titanic.train <- train[indexes,] # takes .7 of train data
+
+titanic.test <- train[-indexes,] # takes 1-.7 of train data
+
+# Checking out the proportions of Survived levels
+prop.table(table(train$Survived))
+prop.table(table(titanic.train$Survived))
+prop.table(table(titanic.test$Survived))
+
+# The Model
+model2 <- randomForest(factor(Survived) ~ Pclass + Sex + Age + SibSp + Parch + Fare + Embarked + Title + FamilyType 
+                       + Shared_ticket + Mother + MissingAge, data = titanic.train, nodesize=42, ntree = 500)
+preds <- predict(model2, titanic.test)
+confusionMatrix(preds, titanic.test$Survived)
+
+```
+
+# Results
+
+The model was run on the training set, predicting 418 witheld patient survival results. Running 500 trees, the model converged nicely to a 16% error rate.
+```{r, echo=FALSE, fig.height=2.5}
+
+# RUNNING THE FINAL MODEL
+
+model1 <- randomForest(factor(Survived) ~ Pclass + Sex + Age + SibSp + Parch + 
+                           Fare + Embarked + Title + FamilyType + Shared_ticket + Mother + MissingAge, data = train, nodesize = 42)
+# Predict on the test set
+test$Survived <- predict(model1, test)
+
+# Save the solution to a dataframe with PassengerID and Survived
+solution <- data.frame(PassengerId = test$PassengerId, Survived = test$Survived)
+
+# Write out to a .csv file with proper formatting for submission
+write.csv(solution, file = "titanic_solution.csv", row.names = FALSE, quote = FALSE)
+
+
+# Plot of convergence to error!
+err <- model2$err.rate[, 1]
+err.iter <- seq(1, 500)
+err2 <- data.frame(cbind(err, err.iter))
+
+ggplot(err2, aes(err.iter, err)) + geom_point(size = .5)
+
+```
+
+The .csv file containing only PassengerId and Survived was submitted to Kaggle for evaluation of Accuracy. Results showed 80.04% accuracy in predicting survival. This was improved from the 78.5% accuracy of the author's previous version of the model.
+
+# Summary and Discussion {#sec:summary}
+
+This machine learning model aimed to predict survival of passengers on the Titanic. As per Kaggle's evaluation, the model achieved over 80% accuracy. This placed in the top 10% of competing models on the Kaggle Leaderboard page. Future improvements to the model should include an analysis of ethnicity to account for biases at the time. Identification of young children traveling with their Mothers could also likely improve accuracy, as they were also prioritized in getting onto a lifeboat with Mothers.
+
+# Acknowledgment {-}
+
+The author would like to thank Jun Yan and all students in the Data Science in Action course for their feedback and support in this learning process.
+
+# References {-}
+
+[Breiman, 2001]: https://link.springer.com/content/pdf/10.1023%2FA%3A1010933404324.pdf
+[MICE]: https://www.jstatsoft.org/v45/i03/
+[randomForest]: https://cran.r-project.org/web/packages/randomForest/
+[template]: https://github.com/wenjie2wang/datalab-templates
